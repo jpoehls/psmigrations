@@ -1,0 +1,6 @@
+*.suo
+*.csproj
+*.resharper.*
+[Bb]in
+[Oo]bj
+_ReSharper.*
