@@ -7,6 +7,32 @@ $SCRIPT_PATH = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.path) "migr
 
 #Install-PSMigrations -ConnectionString $CONN_STR -Provider $DB_PROVIDER
 
+<######### DESIRED USAGE
+
+Get-DbStatus # no params, should guess which connection to use from app's config file
+
+Get-DbStatus -Connection localhost # use the connstr with the name 'localhost' from app's config file
+
+Get-DbStatus -ScriptPath .\myScripts # look for migration scripts in this folder
+
+Get-DbStatus -Connection "server=localhost;database=testdb;integrated security=sspi;" `
+             -Provider "System.Data.SqlClient" # default if not specified
+
+Get-DbStatus # by default just returns summary of db version VS script version
+
+Get-DbStatus -Verbose # returns summary as well as list of applied, unapplied and changed scripts
+
+
+# installs [psmigrations] table in database
+Install-PSMigrations # no params, guess connection
+
+Install-PSMigrations -Connection localhost
+
+Install-PSMigrations -Connection "server=localhost;database=testdb;integrated security=sspi;" `
+                     -Provider "System.Data.SqlClient" # default if not specified
+
+##########>
+
 
 Write-Host "Get-DbStatus"
 Write-Host *****************************
