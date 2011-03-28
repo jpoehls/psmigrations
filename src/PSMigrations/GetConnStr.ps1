@@ -1,0 +1,1 @@
+﻿$projects = (Get-Project -All) | select @{ "Name" = "Path"; "Expression" = {[IO.Path]::GetDirectoryName($_.FullName)} }
