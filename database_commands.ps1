@@ -1,15 +1,34 @@
 ﻿function New-DbConnection {
-
-}
-
-function Test-DbName {
-  [CmdletBinding(DefaultParameterSetName="ConnectionString")]
+  [CmdletBinding()]
   param(
     [Parameter(Position=0, Mandatory=$true)]
-    [string]$Name,
+    [string]$ConnectionString,
+    
+    [Parameter(Position=1, ParameterSetName="ConnectionString")]
+    [string]$Provider = "System.Data.SqlClient"
+  )
+  
+  $factory = [System.Data.Common.DbProviderFactories]::GetFactory($Provider)
+  $Connection = $factory.CreateConnection()
+  $Connection.ConnectionString = $ConnectionString
+  
+  return $Connection
+}
+
+function Test-DbObject {
+  [CmdletBinding(DefaultParameterSetName="ConnectionString")]
+  param(
+    [Parameter(Position=0)]
+    [Alias("Schema")]
+    [string]$SchemaName,
+    
+    [Parameter(Position=1, Mandatory=$true)]
+    [Alias("Table")]
+    [string]$TableName,
     
     [Parameter(Mandatory=$true, ParameterSetName="ConnectionString")]
     [string]$ConnectionString,
+    
     [Parameter(ParameterSetName="ConnectionString")]
     [string]$Provider = "System.Data.SqlClient",
     
@@ -18,14 +37,44 @@ function Test-DbName {
     
     [Data.Common.DbTransaction]$Transaction = $null,
     
-    [ValidateSet("Any", "Table", "Column", "Schema", "Function", "StoredProc", "Index", "Constraint")]
-    [string]$ObjectType = "Any",
-    
     [ValidateSet("InformationSchema", "Sqlite")]
-    [string]$Method = "InformationSchema",
+    [string]$Method = "InformationSchema"
   )
   
+  $params = @{}
   
+  if ($Method -eq "InformationSchema") {
+    $params["Table"] = $TableName 
+    $sql = "SELECT COUNT(*) FROM information_schema.tables WHERE table_name=@Table;"
+  }
+  elseif ($Method -eq "Sqlite") {
+    $sql = "PRAGMA table_info($TableName);"
+  }
+  else {
+    throw "Invalid method specified. [ $Method ]"
+  }
+  
+  if ($Schema) {
+    $sql += " AND table_schema=@Schema"
+    $params["Schema"] = $SchemaName
+  }
+  
+  if ($PsCmdlet.ParameterSetName -eq "ConnectionString") {
+    $result = Invoke-DbCommand -CommandText $sql `
+                               -Parameters $params `
+                               -ConnectionString $ConnectionString `
+                               -Provider $Provider `
+                               -Transaction $Transaction `
+                               -ExecutionMode Scalar 
+  } else {
+    $result = Invoke-DbCommand -CommandText $sql `
+                               -Parameters $params `
+                               -Connection $Connection  `
+                               -Transaction $Transaction `
+                               -ExecutionMode Scalar
+  }
+
+  Write-Output ($result -gt 0)
 }
 
 function Invoke-DbCommand {
@@ -47,6 +96,7 @@ function Invoke-DbCommand {
     [Parameter(Mandatory=$true, ParameterSetName="Connection")]
     [Data.Common.DbConnection]$Connection,
     
+    [Parameter(Mandatory=$false)]
     [Data.Common.DbTransaction]$Transaction,
     
     [ValidateSet("Query", "NonQuery", "Scalar")]
@@ -57,28 +107,34 @@ function Invoke-DbCommand {
   begin {
     # create the connection if it wasn't passed in
     if ($PsCmdlet.ParameterSetName -eq "ConnectionString") {
-      $factory = [System.Data.Common.DbProviderFactories]::GetFactory($Provider)
-  	  $Connection = $factory.CreateConnection()
-  	  $Connection.ConnectionString = $ConnectionString
+      Write-Verbose "Creating connection: $ConnectionString"
+      Write-Verbose "Provider: $Provider"
+      $Connection = New-DbConnection -ConnectionString $ConnectionString -Provider $Provider
     }
     
-    $Connection.Open()
+    if ($Connection.State -eq [Data.ConnectionState]::Closed) {
+      Write-Verbose "Opening connection."
+      $Connection.Open()
+    }
         
     if ($Transaction) {
-        Write-Host "Transaction was passed."
-        $Connection.Enlist($Transaction)
-        $activeTransaction = $Transaction
+      $activeTransaction = $Transaction
     } else {
-        $activeTransaction = $Connection.BeginTransaction()
-        Write-Host "Starting transaction"
+      Write-Verbose "Beginning transaction."
+      $activeTransaction = $Connection.BeginTransaction()
+      $ownTransaction = $true
     }
   }
-  process { 
+  process {
+    Write-Verbose "CommandText: $CommandText"
+  
     # create the command
     $command = $Connection.CreateCommand()
     $command.CommandText = $CommandText
     $command.CommandType = $CommandType
-    $command.Transaction = $Transaction
+    $command.Transaction = $activeTransaction
+    
+    if ($activeTransaction -eq $null) { throw "TX is null!?" }
     
     # add parameters to the command
     $Parameters.Keys | %{ 
@@ -87,6 +143,7 @@ function Invoke-DbCommand {
         $param.Value = $Parameters[$_]
         $param.ParameterName = $_
         $command.Parameters.Add($param) | Out-Null
+        Write-Verbose "Parameter @$($param.ParameterName) = $($param.Value)"
       }
     }
     
@@ -117,17 +174,23 @@ function Invoke-DbCommand {
       }
     }
     catch {
-      if ($transaction) {
-        $transaction.Rollback()
+      if ($activeTransaction) {
+        $activeTransaction.Rollback()
+        Write-Verbose "Transaction rolled back."
         
-        if ($ownTransaction) { $transaction.Dispose() }
+        if ($ownTransaction) {
+          $activeTransaction.Dispose()
+          Write-Debug "Transaction disposed."
+        }
       }
       
-      $Connection.Close()
-      
-      # only dispose the connection if we created it
+      # only close and dispose the connection if we created it
       if ($PsCmdlet.ParameterSetName -eq "ConnectionString") {
-        if ($Connection) { $Connection.Dispose() }
+        if ($Connection) {
+          $Connection.Dispose()
+          Write-Verbose "Connection closed."
+          Write-Debug "Connection disposed."
+        }
       }
       
       Write-Error "Error executing SQL command:`n$CommandText"
@@ -135,21 +198,33 @@ function Invoke-DbCommand {
       throw
     }
     finally {
-      if ($reader) { $reader.Dispose() }
-      if ($command) { $command.Dispose() }
+      if ($reader) {
+        $reader.Dispose()
+        Write-Debug "Reader disposed."
+      }
+      
+      if ($command) {
+        $command.Dispose()
+        Write-Debug "Command disposed."
+      }
     }
   }
   end {
-    if ($transaction -and $ownTransaction) {
-        $transaction.Commit()
-        $transaction.Dispose()
+    if ($activeTransaction -and $ownTransaction) {
+        $activeTransaction.Commit()
+        Write-Verbose "Transaction committed."
+        
+        $activeTransaction.Dispose()
+        Write-Debug "Transaction disposed."
     }
-    
-    $Connection.Close()
   
-    # only dispose the connection if we created it
+    # only close and dispose the connection if we created it
     if ($PsCmdlet.ParameterSetName -eq "ConnectionString") {
-      if ($Connection) { $Connection.Dispose() }
+      if ($Connection) {
+        $Connection.Dispose()
+        Write-Verbose "Connection closed."
+        Write-Debug "Connection disposed."
+      }
     }
   }
 }
@@ -160,14 +235,32 @@ $DB_PROVIDER = "System.Data.SqlClient"
 
 Clear-Host
 
+Test-DbObject -ConnectionString $CONN_STR -Provider $DB_PROVIDER `
+              -Table "psmigrations" -Schema "dbo" -Verbose
+
+<#
 $sql = @("SELECT * FROM benjibender..customer",
          "SELECT email FROM benjibender..customer")
 
+  
 $sql | `
 Invoke-DbCommand -ConnectionString $CONN_STR -Provider $DB_PROVIDER `
-                 -Mode Query | Format-Table
+                 -Mode Query -Verbose | Format-Table
+#>
 
+<#
 Invoke-DbCommand -ConnectionString $CONN_STR -Provider $DB_PROVIDER `
                  -CommandText "SELECT email FROM benjibender..customer" `
                  -Parameters @{id = 1} `
-                 -Mode Query | Format-Table                  
+                 -Mode Query -Verbose | Format-Table                  
+#>
+
+<#
+$conn = New-DbConnection $CONN_STR $DB_PROVIDER
+$conn.Open()
+$tx = $conn.BeginTransaction()
+"SELECT email FROM benjibender..customer" | Invoke-DbCommand -Connection $conn -Transaction $tx `
+                 -Parameters @{id = 1} `
+                 -Mode Query -Verbose | Format-Table                  
+$conn.Close()
+#>
