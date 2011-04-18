@@ -151,7 +151,7 @@ function Invoke-DbCommand {
     try {
       if ($PsCmdlet.ShouldProcess($CommandText)) {
         if ($ExecutionMode -eq "NonQuery") {
-          Write-Output $command.ExecuteNonQuery()
+          $command.ExecuteNonQuery() | Out-Null
         }
         elseif ($ExecutionMode -eq "Scalar") {
           Write-Output $command.ExecuteScalar()
@@ -193,8 +193,8 @@ function Invoke-DbCommand {
         }
       }
       
-      Write-Error "Error executing SQL command:`n$CommandText"
-      
+      Write-Error $error[0].Exception
+      #Write-Error "Error executing SQL command:`n$CommandText"
       throw
     }
     finally {
@@ -227,6 +227,91 @@ function Invoke-DbCommand {
       }
     }
   }
+}
+
+function Split-SqlScript {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position=0, Mandatory=$true, ValueFromPipeline=$true)]
+        [Alias("Sql")]
+        [string]$SqlScript
+    )
+    
+    begin {
+    
+    }
+    process {
+        # Perform a very naive split on lines that only contain
+        # the GO keyword surrounded by optional whitespace.
+        $scriptParts = [regex]::Split($SqlScript, "(?im)^\s*GO\s*$")
+        foreach ($part in $scriptParts) {
+            if ($part.Trim().Length -gt 0) {
+                Write-Output $part
+            }
+        }
+    }
+    end {
+    
+    }
+}
+
+# http://allen-mack.blogspot.com/2008/02/powershell-convert-csv-to-sql-insert.html
+function Get-SqlInsertStatements {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position=0, Mandatory=$true)]
+        [string]$TableName,
+        [Parameter(Position=1, Mandatory=$true)]
+        [PSObject[]]$Objects
+    )
+    
+    $inserts = @()
+    
+    $inserts += "SET IDENTITY_INSERT [$TableName] ON"
+    
+    # Loop through the rows in the csv file.
+    $Objects | % {
+        # The insert variable is used to build a single insert statement.
+        $insert = "INSERT INTO $tableName ("
+        
+        # We only care about the noteproperties, no use dealing with methods and the such.
+        $properties = $_ | Get-Member | where { $_.MemberType -eq "NoteProperty" }
+
+        # Create a comma delimited string of all the property names to use in the insert statement. 
+        # You should make sure that the column headings in the CSV file match the field names in 
+        # your table before you run the script.
+        $properties | % {
+            $value = $_.Definition.SubString($_.Definition.IndexOf("=") + 1)
+            # only insert into the column if we were given a value to insert
+            if ($value.Length -gt 0) {
+                $insert += $_.Name + ", "
+            }
+        }
+        
+        $insert = $insert.TrimEnd(", ") + ") VALUES ("
+        
+        # Couldn't figure out how to access the value directly.  So here I'm forced to use 
+        # substring to get it.  The Definition looks like "System.String PropertyName=PropertyValue".
+        # Since the value will be enclosed in single quotes, you will run into trouble if the value  
+        # contains a single quote.  To escape the single quote in T-SQL, just put another single quote
+        # directly in front of it.
+        $properties | % { 
+            $value = $_.Definition.SubString($_.Definition.IndexOf("=") + 1)
+            # only insert into the column if we were given a value to insert
+            if ($value.Length -gt 0) {
+                $insert += "'" + $value.Replace("'", "''") + "', " 
+            }
+        }
+        
+        $insert = $insert.TrimEnd(", ") + ")"
+        
+        # Append the insert statement to the end of the output file.
+        $inserts += $insert
+    }
+    
+    $inserts += "SET IDENTITY_INSERT [$TableName] OFF"
+    
+    Write-Output $inserts
 }
 
 $CONN_STR = "SERVER=.\SQLEXPRESS;DATABASE=psmigrations;INTEGRATED SECURITY=SSPI;"
